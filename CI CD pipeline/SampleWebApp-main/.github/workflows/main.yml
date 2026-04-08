@@ -1,0 +1,110 @@
+name: Deploy React to IIS (EC2 FINAL)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: myapp   # 👈 change if your folder name is different
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify Node
+        run: |
+          node -v
+          npm -v
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build React app
+        run: npm run build
+
+      - name: Verify build output
+        run: dir
+
+      - name: Deploy to EC2 via WinRM (HTTP FINAL)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "===== START DEPLOYMENT ====="
+
+          # Configure WinRM client
+          winrm set winrm/config/client '@{AllowUnencrypted="true"}'
+          winrm set winrm/config/client/auth '@{Basic="true"}'
+          winrm set winrm/config/client '@{TrustedHosts="*"}'
+
+          Write-Host "WinRM configured"
+
+          $username = "${{ secrets.EC2_USERNAME }}"
+          $passwordPlain = "${{ secrets.EC2_PASSWORD }}"
+          $hostName = "${{ secrets.EC2_HOST }}"
+
+          Write-Host "Connecting to $hostName"
+
+          $password = $passwordPlain | ConvertTo-SecureString -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential($username, $password)
+
+          try {
+              $session = New-PSSession `
+                -ComputerName $hostName `
+                -Credential $cred `
+                -Authentication Basic `
+                -Port 5985
+
+              Write-Host "✅ Session created"
+          }
+          catch {
+              Write-Host "❌ Session creation failed"
+              Write-Host $_
+              exit 1
+          }
+
+          try {
+              Invoke-Command -Session $session -ScriptBlock {
+                  hostname
+              }
+
+              Write-Host "Cleaning IIS folder..."
+              Invoke-Command -Session $session -ScriptBlock {
+                  Remove-Item -Recurse -Force "C:\inetpub\wwwroot\*" -ErrorAction SilentlyContinue
+              }
+
+              Write-Host "Copying build files..."
+
+              # ✅ VITE FIX → dist instead of build
+              Copy-Item -Path "dist\*" `
+                -Destination "C:\inetpub\wwwroot" `
+                -Recurse `
+                -ToSession $session
+
+              Write-Host "Restarting IIS..."
+              Invoke-Command -Session $session -ScriptBlock {
+                  iisreset
+              }
+
+              Write-Host "✅ Deployment successful"
+          }
+          catch {
+              Write-Host "❌ Deployment failed"
+              Write-Host $_
+              exit 1
+          }
+
+          Remove-PSSession $session
+
+          Write-Host "===== DONE ====="
